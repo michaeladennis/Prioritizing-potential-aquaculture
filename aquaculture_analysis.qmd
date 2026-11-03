@@ -1,0 +1,41 @@
+---
+title: "HW 3 - Aquaculture Analysis"
+author: "Michaela Dennis"
+format: pdf
+execute:
+  warning: false
+  message: false
+---
+
+
+```{r}
+#| warning: false
+#| message: false
+
+# Load packages and data
+
+library(sf)
+library(tmap)
+library(tidyverse)
+library(spData)
+library(knitr)
+library(gt)
+library(kableExtra) # table formatting
+library(spDataLarge) # spatial data
+library(geodata) # spatial data
+set_theme(theme_bw())
+```
+
+
+```{r}
+# Load data
+
+eez <- read_sf('Prioritizing-potential-aquaculture/data/wc_regions_clean.shp')
+
+depth <- rast('Prioritizing-potential-aquaculture/data/depth.tif')
+
+sst <- rast(c('Prioritizing-potential-aquaculture/data/average_annual_sst_2008.tif', 'Prioritizing-potential-aquaculture/data/average_annual_sst_2009.tif',
+'Prioritizing-potential-aquaculture/data/average_annual_sst_2010.tif',
+'Prioritizing-potential-aquaculture/data/average_annual_sst_2011.tif',
+'Prioritizing-potential-aquaculture/data/average_annual_sst_2012.tif'))
+```
