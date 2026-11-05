@@ -23,6 +23,7 @@ library(gt)
 library(kableExtra) # table formatting
 library(spDataLarge) # spatial data
 library(geodata) # spatial data
+library(terra)
 set_theme(theme_bw())
 ```
 
@@ -30,12 +31,276 @@ set_theme(theme_bw())
 ```{r}
 # Load data
 
-eez <- read_sf('Prioritizing-potential-aquaculture/data/wc_regions_clean.shp')
+eez <- st_read('Prioritizing-potential-aquaculture/data/wc_regions_clean.shp')
 
 depth <- rast('Prioritizing-potential-aquaculture/data/depth.tif')
 
-sst <- rast(c('Prioritizing-potential-aquaculture/data/average_annual_sst_2008.tif', 'Prioritizing-potential-aquaculture/data/average_annual_sst_2009.tif',
-'Prioritizing-potential-aquaculture/data/average_annual_sst_2010.tif',
-'Prioritizing-potential-aquaculture/data/average_annual_sst_2011.tif',
-'Prioritizing-potential-aquaculture/data/average_annual_sst_2012.tif'))
+# stack the rasters in the call for the data using c()
+sst <- rast(c(
+  'Prioritizing-potential-aquaculture/data/average_annual_sst_2008.tif',
+  'Prioritizing-potential-aquaculture/data/average_annual_sst_2009.tif',
+  'Prioritizing-potential-aquaculture/data/average_annual_sst_2010.tif',
+  'Prioritizing-potential-aquaculture/data/average_annual_sst_2011.tif',
+  'Prioritizing-potential-aquaculture/data/average_annual_sst_2012.tif'
+))
 ```
+
+
+```{r}
+# Check crs
+st_crs(eez) == crs(depth)
+crs(sst) == crs(depth)
+```
+
+```{r}
+# use project because sst is a raster
+sst <- project(sst, crs(depth))
+eez <- st_transform(eez, crs(depth))
+
+```
+
+
+```{r}
+# Check crs
+crs(eez) == crs(depth)
+crs(sst) == crs(depth)
+```
+
+
+```{r}
+# mean temps
+mean_sst <- mean(sst, na.rm = TRUE)
+plot(mean_sst)
+sst_c <- mean_sst - 273.15
+```
+
+
+```{r}
+# crop rasters to match extents
+depth_crop <- crop(depth, sst_c)
+```
+
+
+```{r}
+# resolutions match using bilinear resampling method
+depth_resampled <- resample(depth_crop, sst_c, method = "bilinear")
+plot(depth_resampled)
+
+cat("After resampling:\n")
+cat("Resolutions match:", all(res(depth_resampled) == res(sst_c)), "\n")
+cat(
+  "Origins match:    ",
+  all(round(origin(depth_resampled), 8) == round(origin(sst_c), 8)),
+  "\n"
+)
+cat("Extents match:    ", ext(depth_resampled) == ext(sst_c), "\n")
+```
+
+reclassify SST and depth data into locations that are suitable for oysters
+hint: set suitable values to 1 and unsuitable values to 0
+find locations that satisfy both SST and depth conditions
+```{r}
+# reclassify for suitable area
+# Define a reclassification matrix
+rcl_dep <- matrix(
+  c(
+    -Inf,
+    -70,
+    0,
+    -70,
+    0,
+    1,
+    0,
+    Inf,
+    0
+  ),
+  ncol = 3,
+  byrow = TRUE
+)
+
+# Apply the matrix to reclassify the raster, making all cells 0 or 1
+depth_rcl <- terra::classify(depth_resampled, rcl = rcl_dep)
+```
+
+
+```{r}
+# reclassify for suitable area
+# Define a reclassification matrix
+rcl_sst <- matrix(c(-Inf, 11, 0, 11, 30, 1, 30, Inf, 0), ncol = 3, byrow = TRUE)
+
+# Apply the matrix to reclassify the raster, making all cells 0 or 1
+sst_rcl <- terra::classify(sst_c, rcl = rcl_sst)
+
+
+combined <- c(sst_rcl, depth_rcl)
+```
+
+
+
+```{r}
+# find suitable locations with lapp
+# multiply both of the reclassified
+
+# Stack them, then apply a function of two arguments
+suitable <- lapp(combined, fun = function(sst_rcl, depth_rcl) {
+  sst_rcl * depth_rcl
+})
+
+plot(suitable)
+
+
+# rasterize the eez data
+
+eez_rast <- rasterize(eez, suitable, field = "rgn_id")
+suitable <- mask(suitable, eez_rast)
+
+
+suitable_areas <- cellSize(suitable, unit = "km", mask = TRUE)
+
+
+suitable_zone_mask <- mask(suitable_areas, suitable, maskvalues = 0)
+
+zone <- zonal(suitable_zone_mask, eez_rast, fun = "sum", na.rm = TRUE)
+```
+
+Join the zonal result back to eez by region with left_join(). Then arrange() by suitable area to rank the zones, make a kableExtra table, and create a tmap. The rubric requires a title, a legend with units, a scale bar, and a compass on the map.
+```{r}
+# join zones with suitable areas to the eez outlines by region id so we know where has the most suitable habitat area
+eez_zones <- left_join(eez, zone, by = "rgn_id") |>
+  arrange(desc(area)) # largest suitable area first
+
+# map it!!!
+tm_basemap("Esri.OceanBasemap") +
+  tm_shape(eez_zones) +
+  tm_polygons(
+    fill = "area",
+    fill_alpha = 0.7,
+    fill.scale = tm_scale_continuous(values = "brewer.yl_gn_bu"),
+    fill.legend = tm_legend(
+      title = "Amount of suitable area (km^2)"
+    )
+  ) +
+  tm_title("Suitable Habitat Areas") +
+  tm_scalebar(
+    position = tm_pos_out(
+      "center",
+      "bottom"
+    )
+  ) +
+  tm_compass(
+    position = tm_pos_in(
+      "left",
+      "bottom"
+    )
+  )
+```
+
+make a table for the data
+
+```{r}
+eez_zones |>
+  st_drop_geometry() |>
+  select(rgn_id, area, area_km2) |>
+  arrange(desc(area)) |>
+  mutate(pct_suitable = area / area_km2 * 100) |>
+  kable(
+    digits = 1,
+    col.names = c(
+      "EEZ Region",
+      "Suitable Area (km²)",
+      "Total EEZ Area (km²)",
+      "Suitable (%)"
+    ),
+    caption = "Suitable oyster aquaculture area by West Coast EEZ",
+    booktabs = TRUE
+  ) |>
+  kable_styling(latex_options = c("striped", "hold_position"))
+```
+
+
+functionnnn
+ 
+ ```{r}
+ suitable_eez_map <- function(species_name, min_temp, max_temp, min_depth, max_depth) {
+
+  # --- 1. Validate inputs (custom errors for the rubric) ---
+  if (min_temp >= max_temp) stop("min_temp must be less than max_temp")
+  if (min_depth >= max_depth) stop("min_depth must be less than max_depth")
+  # if (min_depth < 0) stop("Enter depths as positive meters below sea level")
+
+  # --- 2. Reclassify SST ---
+  rcl_temp <- matrix(c(-Inf, min_temp, 0, 
+                min_temp, max_temp, 1,  
+                max_temp, Inf, 0),
+              ncol = 3, byrow = TRUE)
+              # Apply the matrix to reclassify the raster, making all cells 0 or 1
+temp_rcl <- terra::classify(sst_c, rcl = rcl_temp)
+
+  # --- 3. Reclassify depth ---
+  rcl_bathym <- matrix(c(-Inf, min_depth, 0, 
+                min_depth, max_depth, 1,  
+                max_depth, Inf, 0), 
+              ncol = 3, byrow = TRUE)
+              # Apply the matrix to reclassify the raster, making all cells 0 or 1
+bathym_rcl <- terra::classify(depth_resampled, rcl = rcl_bathym)
+
+  # --- 4. Combine conditions ---
+depth_sst <- c(bathym_rcl, temp_rcl)
+
+  # --- 5. Suitable area per EEZ ---
+  # mask to eez_rast, cellSize(), mask out 0s, zonal(sum)
+  suitable <- lapp(depth_sst, fun = function(temp_rcl, bathym_rcl) {
+  temp_rcl * bathym_rcl
+})
+
+# rasterize the eez data
+
+eez_rast <- rasterize(eez, suitable, field = "rgn_id")
+suitable <- mask(suitable, eez_rast)
+
+suitable_areas <- cellSize(suitable, unit = "km", mask = TRUE)
+suitable_zone_mask <- mask(suitable_areas, suitable, maskvalues = 0)
+
+zone <- zonal(suitable_zone_mask, eez_rast, fun = "sum", na.rm = TRUE)
+
+  # --- 6. Join and map ---
+  # left_join(eez, zone, by = "rgn_id")
+  # tmap with paste(species_name, ...) in tm_title()
+  # include a legend title with units, tm_scalebar(), tm_compass()
+eez_zones <- left_join(eez, zone, by = "rgn_id") |>
+  arrange(desc(area)) # largest suitable area first
+
+map <- tm_basemap("Esri.OceanBasemap") +
+  tm_shape(eez_zones) +
+  tm_polygons(
+    fill = "area",
+    fill_alpha = 0.7,
+    fill.scale = tm_scale_continuous(values = "brewer.yl_gn_bu"),
+    fill.legend = tm_legend(
+      title = "Amount of suitable area (km^2)"
+    )
+  ) +
+  tm_title("Suitable Habitat Areas") +
+  tm_scalebar(
+    position = tm_pos_out(
+      "center",
+      "bottom"
+    )
+  ) +
+  tm_compass(
+    position = tm_pos_in(
+      "left",
+      "bottom"
+    )
+  )
+
+  # --- 7. Return ---
+return(map)
+}
+ ```
+
+
+
+ ```{r}
+ suitable_eez_map("crab", 8, 40, 0, 90) 
+ ```
